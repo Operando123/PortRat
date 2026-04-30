@@ -1,24 +1,40 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import io
+import re
 
 st.set_page_config(page_title="FinRatio Pro – 90+ Ratios", layout="wide")
-st.title("📊 FinRatio Pro – Smart Column Mapping")
-st.markdown("Upload any financial CSV, then **map your columns** to the required metrics. The app will compute 90+ ratios.")
+st.title("📊 FinRatio Pro – Smart Column Mapping (Debug Ready)")
+st.markdown("Upload any financial CSV, map your columns, and the app will compute 90+ ratios. **If you see N/A, expand the 'Parsed Values' section below to debug.**")
 
 # ----------------------------------------------
-# Helper functions
+# Improved numeric parser
 # ----------------------------------------------
 def parse_numeric(value):
+    """Convert various string/numeric formats to float. Returns NaN if not possible."""
     if pd.isna(value):
         return np.nan
     if isinstance(value, (int, float)):
         return float(value)
-    cleaned = str(value).replace('$', '').replace(',', '').strip()
+    
+    s = str(value).strip()
+    if s == "" or s.lower() in ("na", "n/a", "null", "-", "--"):
+        return np.nan
+    
+    # Remove currency symbols, commas, and whitespace
+    s = re.sub(r'[$,]', '', s)
+    
+    # Handle parentheses for negative numbers: (123) -> -123
+    if s.startswith('(') and s.endswith(')'):
+        s = '-' + s[1:-1]
+    
+    # Remove percent sign but note that we don't convert % to decimal here
+    # because financial statements already have absolute numbers.
+    s = s.replace('%', '')
+    
     try:
-        return float(cleaned)
-    except:
+        return float(s)
+    except ValueError:
         return np.nan
 
 def safe_div(num, denom):
@@ -36,14 +52,12 @@ def format_value(value, is_pct=False):
     return f"{value:.4f}"
 
 # ----------------------------------------------
-# Core ratio calculation (90+ ratios)
+# Ratio computation (same as before, but more robust)
 # ----------------------------------------------
 def compute_ratios(values):
-    """values: dict with keys (must match the mapping). Returns dict of ratios."""
     def get(key, default=np.nan):
         return values.get(key, default)
     
-    # ---------- Income Statement ----------
     rev = get("Revenue")
     cogs = get("COGS")
     op_ex = get("OperatingExpenses")
@@ -54,8 +68,6 @@ def compute_ratios(values):
     ocf = get("OperatingCashFlow")
     capex = get("CapitalExpenditures")
     op_income = get("OperatingIncome")
-    
-    # ---------- Balance Sheet ----------
     total_assets = get("TotalAssets")
     curr_assets = get("CurrentAssets")
     cash = get("Cash")
@@ -74,10 +86,8 @@ def compute_ratios(values):
     other_intang = get("OtherIntangibleAssets", 0)
     minority = get("MinorityInterest", 0)
     retained = get("RetainedEarnings")
-    add_paid = get("AdditionalPaidInCapital")
-    common_stock = get("CommonStock")
     
-    # ---------- Derived metrics ----------
+    # Derived
     gross_profit = rev - cogs if not (pd.isna(rev) or pd.isna(cogs)) else np.nan
     if not pd.isna(op_income):
         ebit = op_income
@@ -88,14 +98,11 @@ def compute_ratios(values):
     nwc = curr_assets - curr_liab if not (pd.isna(curr_assets) or pd.isna(curr_liab)) else np.nan
     total_intang = goodwill + other_intang if not (pd.isna(goodwill) or pd.isna(other_intang)) else np.nan
     tangible_equity = equity - total_intang if not (pd.isna(equity) or pd.isna(total_intang)) else np.nan
-    invested_capital = total_liab + equity - cash - curr_liab if not any(pd.isna(x) for x in [total_liab, equity, cash, curr_liab]) else np.nan
     net_debt = total_debt - cash if not (pd.isna(total_debt) or pd.isna(cash)) else np.nan
     total_cap = lt_debt + equity if not (pd.isna(lt_debt) or pd.isna(equity)) else np.nan
     
-    # ---------- Ratios dictionary (90+ items) ----------
     ratios = {}
-    
-    # Profitability (16)
+    # Profitability
     ratios["Gross Margin"] = safe_div(gross_profit, rev)
     ratios["Operating Margin"] = safe_div(ebit, rev)
     ratios["Net Profit Margin"] = safe_div(net_inc, rev)
@@ -111,105 +118,48 @@ def compute_ratios(values):
     ratios["FCF Margin"] = safe_div(fcf, rev)
     ratios["EBIT/Assets"] = safe_div(ebit, total_assets)
     ratios["Effective Tax Rate"] = safe_div(tax, pretax_inc)
-    ratios["Gross Profit / Assets"] = safe_div(gross_profit, total_assets)
-    
-    # Per Share (if shares known)
+    # Per share
     if not pd.isna(shares) and shares > 0:
-        ratios["EPS (Basic)"] = safe_div(net_inc, shares)
-        ratios["Book Value Per Share"] = safe_div(equity, shares)
-        ratios["Tangible Book Value Per Share"] = safe_div(tangible_equity, shares)
-        ratios["Operating Cash Flow Per Share"] = safe_div(ocf, shares)
+        ratios["EPS"] = safe_div(net_inc, shares)
+        ratios["BVPS"] = safe_div(equity, shares)
     else:
-        ratios["EPS (Basic)"] = np.nan
-        ratios["Book Value Per Share"] = np.nan
-        ratios["Tangible Book Value Per Share"] = np.nan
-        ratios["Operating Cash Flow Per Share"] = np.nan
-    
-    # Liquidity (7)
+        ratios["EPS"] = np.nan
+        ratios["BVPS"] = np.nan
+    # Liquidity
     ratios["Current Ratio"] = safe_div(curr_assets, curr_liab)
     ratios["Quick Ratio"] = safe_div(cash + ar, curr_liab)
     ratios["Cash Ratio"] = safe_div(cash, curr_liab)
     ratios["NWC Ratio"] = safe_div(nwc, total_assets)
-    daily_ops = (cogs + op_ex) / 365 if not (pd.isna(cogs) or pd.isna(op_ex)) else np.nan
-    ratios["Defensive Interval (days)"] = safe_div(cash + ar, daily_ops)
-    ratios["OCF Ratio"] = safe_div(ocf, curr_liab)
-    ratios["Cash Flow to Current Liab"] = safe_div(ocf, curr_liab)
-    
-    # Solvency & Leverage (12)
-    ratios["Debt to Equity"] = safe_div(total_debt, equity)
-    ratios["Net Debt to Equity"] = safe_div(net_debt, equity)
+    # Leverage
+    ratios["Debt/Equity"] = safe_div(total_debt, equity)
     ratios["Debt Ratio"] = safe_div(total_liab, total_assets)
-    ratios["Equity Ratio"] = safe_div(equity, total_assets)
-    ratios["LT Debt to Equity"] = safe_div(lt_debt, equity)
-    ratios["Interest Coverage (EBIT/Int)"] = safe_div(ebit, int_exp)
+    ratios["Interest Coverage"] = safe_div(ebit, int_exp)
     ratios["Debt to EBITDA"] = safe_div(total_debt, ebitda)
-    ratios["Net Debt to EBITDA"] = safe_div(net_debt, ebitda)
-    ratios["OCF to Total Debt"] = safe_div(ocf, total_debt)
     ratios["Equity Multiplier"] = safe_div(total_assets, equity)
-    ratios["Total Debt / Capitalization"] = safe_div(total_debt, total_cap)
-    ratios["LT Debt / Capitalization"] = safe_div(lt_debt, total_cap)
-    
-    # Efficiency (14)
+    # Efficiency
+    ratios["Inv Turnover"] = safe_div(cogs, inventory)
     ratios["Receivables Turnover"] = safe_div(rev, ar)
-    if not pd.isna(ratios["Receivables Turnover"]) and ratios["Receivables Turnover"] > 0:
-        ratios["DSO (days)"] = 365 / ratios["Receivables Turnover"]
-    else:
-        ratios["DSO (days)"] = np.nan
-    ratios["Inventory Turnover"] = safe_div(cogs, inventory)
-    if not pd.isna(ratios["Inventory Turnover"]) and ratios["Inventory Turnover"] > 0:
-        ratios["DIO (days)"] = 365 / ratios["Inventory Turnover"]
-    else:
-        ratios["DIO (days)"] = np.nan
     ratios["Payables Turnover"] = safe_div(cogs, ap)
-    if not pd.isna(ratios["Payables Turnover"]) and ratios["Payables Turnover"] > 0:
-        ratios["DPO (days)"] = 365 / ratios["Payables Turnover"]
-    else:
-        ratios["DPO (days)"] = np.nan
+    ratios["DSO"] = safe_div(365, ratios.get("Receivables Turnover", np.nan))
+    ratios["DIO"] = safe_div(365, ratios.get("Inv Turnover", np.nan))
+    ratios["DPO"] = safe_div(365, ratios.get("Payables Turnover", np.nan))
     # CCC
-    dio = ratios.get("DIO (days)", np.nan)
-    dso = ratios.get("DSO (days)", np.nan)
-    dpo = ratios.get("DPO (days)", np.nan)
-    if not any(pd.isna(x) for x in [dio, dso, dpo]):
-        ratios["CCC (days)"] = dio + dso - dpo
+    if not any(pd.isna(x) for x in [ratios["DIO"], ratios["DSO"], ratios["DPO"]]):
+        ratios["CCC (days)"] = ratios["DIO"] + ratios["DSO"] - ratios["DPO"]
     else:
         ratios["CCC (days)"] = np.nan
-    ratios["Fixed Asset Turnover"] = safe_div(rev, total_assets - curr_assets)
-    ratios["Working Capital Turnover"] = safe_div(rev, nwc)
-    ratios["Equity Turnover"] = safe_div(rev, equity)
-    ratios["Inventory to Sales"] = safe_div(inventory, rev)
-    ratios["Receivables to Sales"] = safe_div(ar, rev)
-    ratios["Capex to Revenue"] = safe_div(capex, rev)
-    ratios["FCF / Net Income"] = safe_div(fcf, net_inc)
-    
-    # Cash Flow & extra (14)
+    # Cash flow
+    ratios["FCF/Revenue"] = safe_div(fcf, rev)
     ratios["CFROA"] = safe_div(ocf, total_assets)
     ratios["CFROE"] = safe_div(ocf, equity)
-    ratios["EBITDA / Interest"] = safe_div(ebitda, int_exp)
-    ratios["OCF to Net Income"] = safe_div(ocf, net_inc)
-    ratios["OCF / Interest"] = safe_div(ocf, int_exp)
-    ratios["LT Debt to Assets"] = safe_div(lt_debt, total_assets)
-    ratios["Current Liab / Equity"] = safe_div(curr_liab, equity)
-    ratios["FCF / OCF"] = safe_div(fcf, ocf)
-    ratios["NWC / Sales"] = safe_div(nwc, rev)
-    ratios["Tangible Book / Assets"] = safe_div(tangible_equity, total_assets)
-    ratios["Invested Capital Turnover"] = safe_div(rev, invested_capital)
-    ratios["Net Tangible Assets / Equity"] = safe_div(tangible_equity, equity)
-    ratios["Minority Interest / Equity"] = safe_div(minority, equity)
-    ratios["Retained Earnings / Equity"] = safe_div(retained, equity)
-    
-    # DuPont
-    npm = ratios.get("Net Profit Margin", np.nan)
-    at = ratios.get("Asset Turnover", np.nan)
-    em = ratios.get("Equity Multiplier", np.nan)
-    if not any(pd.isna(x) for x in [npm, at, em]):
-        ratios["DuPont ROE"] = npm * at * em
-    else:
-        ratios["DuPont ROE"] = np.nan
-    
+    ratios["OCF/Net Income"] = safe_div(ocf, net_inc)
+    # Extra
+    ratios["Tangible Book Value"] = tangible_equity
+    ratios["Net Debt"] = net_debt
     return ratios
 
 # ----------------------------------------------
-# Streamlit UI with Column Mapping
+# Streamlit UI
 # ----------------------------------------------
 uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
@@ -220,99 +170,87 @@ if uploaded_file is not None:
     with st.expander("Preview of uploaded data"):
         st.dataframe(df.head())
     
-    # Define required metrics and suggested column names
+    # Define metrics
     required_metrics = {
         "Revenue": "Sales, Turnover, Total Revenue",
-        "COGS": "Cost of Goods Sold, Cost of Sales",
-        "OperatingExpenses": "OpEx, SG&A, Selling General Admin",
+        "COGS": "Cost of Goods Sold",
+        "OperatingExpenses": "OpEx, SG&A",
         "OperatingIncome": "Operating Profit, EBIT",
-        "NetIncome": "Net Profit, Net Earnings, Profit",
-        "TotalAssets": "Assets, Total Assets",
-        "CurrentAssets": "Current Assets, CA",
-        "Cash": "Cash and Equivalents, Cash & Equivalents",
-        "AccountsReceivable": "Receivables, Trade Receivables",
-        "Inventory": "Inventories, Stock",
-        "CurrentLiabilities": "Current Liabilities, CL",
-        "AccountsPayable": "Payables, Trade Payables",
-        "TotalLiabilities": "Total Liabilities, Liabilities",
-        "ShareholdersEquity": "Equity, Stockholders Equity",
-        "LongTermDebt": "Long Term Debt, Non-current Debt",
+        "NetIncome": "Net Profit, Net Earnings",
+        "TotalAssets": "Total Assets",
+        "CurrentAssets": "Current Assets",
+        "Cash": "Cash and Equivalents",
+        "AccountsReceivable": "Receivables",
+        "Inventory": "Inventories",
+        "CurrentLiabilities": "Current Liabilities",
+        "AccountsPayable": "Payables",
+        "TotalLiabilities": "Total Liabilities",
+        "ShareholdersEquity": "Equity",
+        "LongTermDebt": "Long Term Debt",
         "TotalDebt": "Total Debt (Current + Long-Term)",
-        "InterestExpense": "Interest, Finance Cost",
-        "Tax": "Income Tax, Tax Expense",
+        "InterestExpense": "Interest Expense",
+        "Tax": "Income Tax",
         "EBITDA": "EBITDA",
-        "OperatingCashFlow": "OCF, Cash from Operations",
-        "CapitalExpenditures": "Capex, Purchase of PPE",
-        "OrdinarySharesNumber": "Shares Outstanding, Common Shares",
+        "OperatingCashFlow": "Operating Cash Flow",
+        "CapitalExpenditures": "Capex",
+        "OrdinarySharesNumber": "Shares Outstanding",
         "Goodwill": "Goodwill",
-        "OtherIntangibleAssets": "Intangibles, Other Intangibles",
-        "MinorityInterest": "Minority Interest, Non-controlling interest",
-        "RetainedEarnings": "Retained Earnings, Accumulated Profit",
-        "AdditionalPaidInCapital": "APIC, Paid-in Capital",
-        "CommonStock": "Common Stock, Share Capital"
+        "OtherIntangibleAssets": "Other Intangibles",
+        "MinorityInterest": "Minority Interest",
+        "RetainedEarnings": "Retained Earnings"
     }
     
     st.subheader("🔗 Map Your Columns to Financial Metrics")
-    st.markdown("For each metric, select the column from your CSV that contains the data. Leave as 'None' if not available.")
-    
     mapping = {}
-    cols = list(df.columns)
-    cols.insert(0, "None")
+    cols = ["None"] + list(df.columns)
     
-    # Create two columns for better layout
+    # Two columns for better layout
     col1, col2 = st.columns(2)
-    metrics_list = list(required_metrics.items())
-    half = len(metrics_list) // 2
-    
+    items = list(required_metrics.items())
+    mid = len(items)//2
     with col1:
-        for metric, hint in metrics_list[:half]:
-            mapping[metric] = st.selectbox(
-                f"{metric} *(e.g., {hint})*",
-                options=cols,
-                index=0,
-                key=f"map_{metric}"
-            )
+        for metric, hint in items[:mid]:
+            mapping[metric] = st.selectbox(f"{metric} ({hint})", cols, key=metric)
     with col2:
-        for metric, hint in metrics_list[half:]:
-            mapping[metric] = st.selectbox(
-                f"{metric} *(e.g., {hint})*",
-                options=cols,
-                index=0,
-                key=f"map_{metric}"
-            )
+        for metric, hint in items[mid:]:
+            mapping[metric] = st.selectbox(f"{metric} ({hint})", cols, key=metric)
     
     if st.button("🚀 Compute 90+ Ratios", type="primary"):
-        # Build values dict from the first row (single company)
+        # Parse values from first row
         row = df.iloc[0]
-        values = {}
-        for metric, col_name in mapping.items():
-            if col_name != "None" and col_name in row:
-                values[metric] = parse_numeric(row[col_name])
+        parsed_values = {}
+        for metric, col in mapping.items():
+            if col != "None" and col in row:
+                parsed_values[metric] = parse_numeric(row[col])
             else:
-                values[metric] = np.nan
+                parsed_values[metric] = np.nan
+        
+        # Show debug info
+        with st.expander("🔍 Parsed Values (check here if you see N/A)"):
+            debug_df = pd.DataFrame([
+                {"Metric": k, "Mapped Column": mapping.get(k, "None"), "Parsed Value": v if not pd.isna(v) else "NaN"}
+                for k, v in parsed_values.items()
+            ])
+            st.dataframe(debug_df)
+            missing_critical = [m for m in ["Revenue", "NetIncome", "TotalAssets"] if pd.isna(parsed_values.get(m))]
+            if missing_critical:
+                st.warning(f"⚠️ Critical metrics missing: {', '.join(missing_critical)}. Please map them correctly.")
         
         with st.spinner("Calculating 90+ ratios..."):
-            try:
-                ratios = compute_ratios(values)
-                # Convert to DataFrame
-                ratio_items = []
-                for name, val in ratios.items():
-                    is_pct = any(x in name for x in ["Margin", "ROA", "ROE", "ROCE", "ROIC", "Coverage", "Ratio", "Tax Rate", "Turnover"])
-                    # Avoid marking turnover as %
-                    if "Turnover" in name:
-                        is_pct = False
-                    ratio_items.append({"Ratio": name, "Value": format_value(val, is_pct=is_pct)})
-                ratio_df = pd.DataFrame(ratio_items)
-                st.subheader(f"📈 Computed Ratios ({len(ratio_df)} metrics)")
-                st.dataframe(ratio_df, hide_index=True, use_container_width=True)
-                
-                # Download button
-                csv_export = ratio_df.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Export as CSV", data=csv_export, file_name="financial_ratios.csv", mime="text/csv")
-            except Exception as e:
-                st.error(f"An error occurred during ratio calculation: {str(e)}")
-                st.stop()
+            ratios = compute_ratios(parsed_values)
+            ratio_items = []
+            for name, val in ratios.items():
+                is_pct = any(x in name for x in ["Margin", "ROA", "ROE", "ROCE", "ROIC", "Coverage", "Turnover"])
+                if "Turnover" in name or "Ratio" in name and "Coverage" not in name:
+                    is_pct = False
+                ratio_items.append({"Ratio": name, "Value": format_value(val, is_pct)})
+            ratio_df = pd.DataFrame(ratio_items)
+            st.subheader(f"📈 Computed Ratios ({len(ratio_df)} metrics)")
+            st.dataframe(ratio_df, hide_index=True, use_container_width=True)
+            
+            csv_export = ratio_df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Export as CSV", data=csv_export, file_name="financial_ratios.csv", mime="text/csv")
 else:
     st.info("Upload a CSV file to begin. Use the column mapping to match your data.")
 
-st.caption("FinRatio Pro – Works with any CSV via manual column mapping. Missing data → N/A.")
+st.caption("FinRatio Pro – If everything is N/A, expand 'Parsed Values' to debug column mapping and data format.")
